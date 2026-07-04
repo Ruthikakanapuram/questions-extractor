@@ -16,7 +16,8 @@ from openai import OpenAI
 # Fixed paths - edit these only
 # ─────────────────────────────────────────────
 
-INPUT_PDF = Path("input/5th_maths.pdf")
+# INPUT_PDF = Path("input/9th_science_c2.pdf")
+INPUT_PDF = Path("input/9th_social_c2.pdf")
 # INPUT_PDF = Path("input/9th_maths.pdf")
 
 BASE_OUTPUT_DIR = Path("output")
@@ -34,9 +35,9 @@ DELAY_SECONDS = 1.0
 # Prompt
 # ─────────────────────────────────────────────
 SYSTEM_PROMPT = """
-You are a precise text extraction tool for NCERT/CBSE textbook content.
+You are a precise question extraction tool for NCERT/CBSE textbook content across all subjects including Mathematics, Science, Social Studies, English, Biology, and Hindi.
 
-Your ONLY job is to find student-facing Mathematics questions in the provided textbook chunk and copy them EXACTLY as written.
+Your ONLY job is to find student-facing questions in the provided textbook chunk and copy them EXACTLY as written. Never answer the questions.
 
 ## RULE 1 — VERBATIM EXTRACTION
 - Copy every extracted question EXACTLY as it appears in the source.
@@ -60,7 +61,7 @@ Skip these:
 - Definitions, explanations, body text
 - Solved/worked examples
 - "Note for Teachers", "For the Teacher", or teacher-facing content
-- Rhetorical chapter-opening questions that are not Mathematics tasks
+- Rhetorical chapter-opening questions that are not subject-specific tasks
 - Standalone table headers or labels with no task attached
 - Figure captions that do not ask the student to do anything
 
@@ -118,6 +119,16 @@ When a question depends on an image, figure, picture, map, or diagram:
 - Image ids will be provided as [IMAGE_REF: image_1], [IMAGE_REF: image_2], etc.
 - If one image is shared by a context block for many questions, include the same image id in every dependent question.
 - If no image is needed, return "image_refs": [].
+## RULE 10 — MULTIPLE IMAGE MAPPING
+A chunk may contain multiple images. Map images carefully.
+Use these rules:
+- Only add an image id to image_refs if the question actually depends on that image.
+- If the question mentions a figure number such as "Fig. 2.1", map only the image nearest to that figure label.
+- If the text says "above figure", "below figure", "shown below", "observe the picture", or "look at the diagram", map the nearest image in reading order.
+- If one setup/context image applies to many questions, use the same image id for all those dependent questions.
+- Do NOT attach all images in the chunk unless the question clearly depends on all of them.
+- If the image is decorative, chapter artwork, icon, or unrelated illustration, do not map it.
+- If you are unsure whether an image is required, keep image_refs as [] and set has_image false.
 ## OUTPUT FORMAT
 Return ONLY valid JSON. No markdown fences. No commentary.
 
@@ -262,13 +273,55 @@ def build_image_lookup_from_refs(image_refs: list[dict]) -> dict[str, dict]:
     return lookup
 
 
+# def resolve_question_image_refs(question: dict, chunk_image_refs: list[dict]) -> list[dict]:
+#     """
+#     Convert model-returned image_refs like ["image_1"] into full image metadata.
+
+#     If has_image is true but model forgot image_refs, attach all chunk images.
+#     This is useful when a shared figure applies to all questions in the chunk.
+#     """
+#     if not question.get("has_image"):
+#         return []
+
+#     refs_by_id = {
+#         ref["image_id"]: ref
+#         for ref in chunk_image_refs
+#     }
+
+#     raw_refs = question.get("image_refs", [])
+
+#     resolved = []
+
+#     if isinstance(raw_refs, list):
+#         for item in raw_refs:
+#             if isinstance(item, str):
+#                 ref = refs_by_id.get(item)
+#                 if ref:
+#                     resolved.append(ref)
+
+#             elif isinstance(item, dict):
+#                 image_id = item.get("image_id")
+#                 ref = refs_by_id.get(image_id)
+#                 if ref:
+#                     resolved.append(ref)
+
+#     # Fallback: if question depends on image but model did not return image_refs,
+#     # attach all images from that chunk.
+#     if not resolved and chunk_image_refs:
+#         resolved = chunk_image_refs
+
+#     return resolved
+
 def resolve_question_image_refs(question: dict, chunk_image_refs: list[dict]) -> list[dict]:
     """
     Convert model-returned image_refs like ["image_1"] into full image metadata.
 
-    If has_image is true but model forgot image_refs, attach all chunk images.
-    This is useful when a shared figure applies to all questions in the chunk.
+    Safer behavior:
+    - Only attach images explicitly returned by the model.
+    - Do NOT attach all chunk images automatically.
+    - If has_image is true but image_refs is empty, keep it empty and mark warning.
     """
+
     if not question.get("has_image"):
         return []
 
@@ -278,7 +331,6 @@ def resolve_question_image_refs(question: dict, chunk_image_refs: list[dict]) ->
     }
 
     raw_refs = question.get("image_refs", [])
-
     resolved = []
 
     if isinstance(raw_refs, list):
@@ -294,10 +346,12 @@ def resolve_question_image_refs(question: dict, chunk_image_refs: list[dict]) ->
                 if ref:
                     resolved.append(ref)
 
-    # Fallback: if question depends on image but model did not return image_refs,
-    # attach all images from that chunk.
-    if not resolved and chunk_image_refs:
-        resolved = chunk_image_refs
+    # Do NOT blindly attach all images.
+    # This avoids wrong mapping when a chunk has multiple images.
+    if question.get("has_image") and not resolved:
+        question["image_mapping_warning"] = (
+            "Model marked this question as image-based but did not provide a valid image_ref."
+        )
 
     return resolved
 def extract_chapter(text: str) -> Optional[str]:
@@ -505,15 +559,7 @@ def is_valid_chunk_heading(label: str) -> bool:
 
 
 def find_all_chunk_headings(markdown_text: str) -> list[tuple[re.Match, str, str]]:
-    """
-    Finds all meaningful chunk headings in the markdown.
 
-    Supports:
-    ## **Exercise Set 1.2**
-    ### Let Us Think
-    **Let Us Do**
-    #### 1.4 DISTANCE BETWEEN TWO POINTS IN THE 2-D PLANE
-    """
     heading_pattern = re.compile(
         r"^("
         r"#{1,6}\s+(.+?)"                    # markdown heading
@@ -826,8 +872,8 @@ def build_interleaved_content_blocks(chunk: dict) -> list[dict]:
 
     header_text = f"""
 Board: NCERT
-Class: 5
-Subject: Mathematics
+Class: 9
+Subject: Social
 
 Chunk Label: {chunk.get("label", "")}
 Chunk Type: {chunk.get("chunk_type", "")}
@@ -873,13 +919,23 @@ IMPORTANT:
             image_path = img_ref.get("copied_path") or img_ref.get("source_path")
             image_block = make_image_block(image_path)
 
+            # content_blocks.append({
+            #     "type": "text",
+            #     "text": (
+            #         f"[IMAGE_REF: {image_id}]\n"
+            #         f"Markdown path: {img_ref.get('markdown_path', '')}\n"
+            #         f"Original path: {img_ref.get('original_path', '')}\n"
+            #         f"This image appears here in the textbook."
+            #     )
+            # })
             content_blocks.append({
                 "type": "text",
                 "text": (
-                    f"[IMAGE_REF: {image_id}]\n"
+                    f"\n[IMAGE_REF: {image_id}]\n"
+                    f"This image appears at this exact position in the textbook chunk.\n"
+                    f"Use this image id only for questions that refer to this nearby image, figure, diagram, map, table, or picture.\n"
                     f"Markdown path: {img_ref.get('markdown_path', '')}\n"
                     f"Original path: {img_ref.get('original_path', '')}\n"
-                    f"This image appears here in the textbook."
                 )
             })
 
