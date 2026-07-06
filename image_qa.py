@@ -16,6 +16,7 @@ from openai import OpenAI
 # Fixed paths - edit these only
 # ─────────────────────────────────────────────
 
+# INPUT_PDF = Path("input/9th_hindi_c2.pdf")
 # INPUT_PDF = Path("input/9th_science_c2.pdf")
 INPUT_PDF = Path("input/9th_social_c2.pdf")
 # INPUT_PDF = Path("input/9th_maths.pdf")
@@ -66,6 +67,8 @@ Skip these:
 - Figure captions that do not ask the student to do anything
 
 ## RULE 4 — GROUPING
+- The procedure steps (numbered 1, 2, 3...) are NOT questions — do not extract them.
+- Only extract the observation/conclusion/inference questions that follow the procedure.
 Treat as ONE question when:
 - A scenario/narrative is followed by blanks about the same context
 - A question stem is followed by a table the student must fill
@@ -119,16 +122,63 @@ When a question depends on an image, figure, picture, map, or diagram:
 - Image ids will be provided as [IMAGE_REF: image_1], [IMAGE_REF: image_2], etc.
 - If one image is shared by a context block for many questions, include the same image id in every dependent question.
 - If no image is needed, return "image_refs": [].
-## RULE 10 — MULTIPLE IMAGE MAPPING
-A chunk may contain multiple images. Map images carefully.
-Use these rules:
-- Only add an image id to image_refs if the question actually depends on that image.
-- If the question mentions a figure number such as "Fig. 2.1", map only the image nearest to that figure label.
-- If the text says "above figure", "below figure", "shown below", "observe the picture", or "look at the diagram", map the nearest image in reading order.
-- If one setup/context image applies to many questions, use the same image id for all those dependent questions.
-- Do NOT attach all images in the chunk unless the question clearly depends on all of them.
-- If the image is decorative, chapter artwork, icon, or unrelated illustration, do not map it.
-- If you are unsure whether an image is required, keep image_refs as [] and set has_image false.
+## RULE 10 — MULTI-IMAGE ANALYSIS PASS (do this BEFORE extracting questions)
+
+When a chunk contains more than one image, follow this exact reasoning sequence:
+
+STEP 1 — INVENTORY ALL IMAGES
+Before extracting any question, list every image in the chunk in reading order.
+For each image note:
+  - Its IMAGE_REF id (e.g., image_1, image_2)
+  - Its position in the chunk (before/after which text)
+  - What it visually contains: diagram, graph, map, figure, table, decorative art, icon, chapter illustration
+  - Whether it has a label near it in the text (e.g., "Fig. 2.1", "Fig. 3", "Diagram A")
+
+STEP 2 — CLASSIFY EACH IMAGE
+For each image, decide:
+  - QUESTION_IMAGE: directly required to answer one or more questions
+      → the question cannot be understood or answered without this image
+      → examples: a labelled diagram to identify parts, a graph to read values from,
+        a coordinate figure to plot points on, a map to locate regions on
+  - CONTEXT_IMAGE: part of a shared setup block that scopes multiple questions
+      → example: Fig. 1.5 showing a floor plan used by questions 1–4
+  - DECORATIVE: chapter artwork, section dividers, icons, portraits, unrelated illustrations
+      → these must NEVER appear in image_refs
+
+STEP 3 — BUILD AN IMAGE-TO-QUESTION MAP
+For each QUESTION_IMAGE or CONTEXT_IMAGE:
+  - Identify which question number(s) depend on it
+  - Use these signals to decide dependency:
+      a) The question text explicitly names the figure: "Using Fig. 2.1", "Refer to the diagram above"
+      b) The question text uses proximity language: "shown below", "above figure", "observe the picture"
+         → map to the nearest image in reading order (the image immediately before or after)
+      c) The image appears inside a context block that scopes questions 1–N
+         → map that image to ALL questions 1–N
+      d) The question asks to label, draw, identify, or plot something
+         and an image immediately precedes or follows it
+         → map that image to that question
+      e) No question refers to the image AND it is not part of a context block
+         → classify as DECORATIVE, do not map
+
+STEP 4 — VALIDATE BEFORE ASSIGNING
+Before adding an image_ref to any question, confirm:
+  ✓ The question cannot be fully understood without the image
+  ✓ The image is the correct one (matches figure label or is nearest in reading order)
+  ✓ The image is not decorative or illustrative-only
+  ✓ You are not attaching an image just because it is nearby —
+    proximity alone is not sufficient; the question must actually need it
+
+Only after completing STEPS 1–4 should you begin extracting questions and populating image_refs.
+## RULE 11 — IMAGE ASSIGNMENT SUMMARY
+Apply the image-to-question map built in RULE 11 when populating image_refs.
+- A question may have 0, 1, or multiple image_refs depending on the map.
+- If the map shows an image is shared across a context block, assign it to every dependent question.
+- Never assign an image classified as DECORATIVE.
+- If after RULE 11 analysis you are still uncertain whether an image is needed, set image_refs: [] and has_image: false. Do not guess.
+## IMPORTANT:
+- Always verify that the image reference is correct and the image is actually needed for the question.
+- If a question has a context block that contains an image, ensure that image is included in the question's image_refs.
+- If Table id or table is mentioned in the question, include the corresponding table also.
 ## OUTPUT FORMAT
 Return ONLY valid JSON. No markdown fences. No commentary.
 
